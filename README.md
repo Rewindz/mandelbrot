@@ -1,4 +1,4 @@
-#Simple GTK Mandelbrot
+# Simple GTK Mandelbrot
 
 - Hm
 - What To Put

@@ -1,4 +1,4 @@
-project('testing', 'c')
+project('Mandelbrot', 'c')
 
 gtkdep = dependency('gtk+-3.0')
 cc = meson.get_compiler('c')
