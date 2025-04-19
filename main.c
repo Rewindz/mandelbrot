@@ -6,13 +6,15 @@
 
 #include "colours.h"
 
+//#define MANDEL_GPU_MODE
 
-#define MAX_ITERATIONS 100
+
+#define MAX_ITERATIONS 1000
 #define PAN_SPEED 0.1
 #define ZOOM_FACTOR 0.9
 
-int width = 1920;
-int height = 1080;
+int width = 400;
+int height = 400;
 
 double center_x = -0.5;
 double center_y = 0.0;
@@ -36,20 +38,21 @@ void main(){
 )glsl";
 
 const char *fragment_shader_src = R"glsl(
-#version 330 core
+#version 400
+#extension GL_ARB_gpu_shader_fp64 : enable
 in vec2 v_pos;
 out vec4 fragColor;
 
 uniform vec2 u_center;
 uniform float u_scale;
 uniform vec2 u_resolution;
+uniform int u_iters;
 
-int iters = 100000;
 
 int mandelbrot(vec2 c){
   vec2 z = vec2(0.0);
   int i;
-  for(i=0; i < iters; ++i){
+  for(i=0; i < u_iters; ++i){
     if(dot(z, z) > 4.0) break;
     z = vec2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y);
   }
@@ -60,12 +63,14 @@ int mandelbrot(vec2 c){
 void main(){
   vec2 uv = v_pos * u_resolution * u_scale + u_center;
   int m = mandelbrot(uv);
-float t = float(m) / float(iters);
+  float t = float(m) / float(u_iters);
   vec3 color = vec3(t, t * t, t * t * t);
   fragColor = vec4(color, 1.0);
 }
 )glsl";
 
+
+ //dvec2 uv = v_pos * u_resolution * u_scale + u_center;
 
 static GLuint compile_shader(GLenum type, const char *src)
 {
@@ -107,6 +112,8 @@ static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
 
   int w = gtk_widget_get_allocated_width(GTK_WIDGET(area));
   int h = gtk_widget_get_allocated_height(GTK_WIDGET(area));
+  int max_iterations = MAX_ITERATIONS + (int)(log10(1.0 / scale) * 50);
+  printf("Max iterations: %i\n", max_iterations);
 
   glViewport(0, 0, w, h);
   glClear(GL_COLOR_BUFFER_BIT);
@@ -117,6 +124,7 @@ static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
   glUniform2f(glGetUniformLocation(program, "u_center"), center_x, center_y);
   glUniform1f(glGetUniformLocation(program, "u_scale"), scale / width);
   glUniform2f(glGetUniformLocation(program, "u_resolution"), (float)width, (float)height);
+  glUniform1i(glGetUniformLocation(program, "u_iters"), max_iterations);
 
   glDrawArrays(GL_TRIANGLES, 0, 6);
 
@@ -195,7 +203,6 @@ static gboolean scroll_event(GtkWidget *widget, GdkEvent *event, gpointer user_d
 
 static gboolean key_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
-  printf("Key Event\n");
   GdkEventKey *key_event = (GdkEventKey *) event;
   switch(key_event->keyval){
   case GDK_KEY_Up:
@@ -248,7 +255,11 @@ static gboolean mouse_motion_event(GtkWidget *widget, GdkEventMotion *motion_eve
     double dy = motion_event->y - start_y;
 
     center_x -= dx * scale / width;
+#ifdef MANDEL_GPU_MODE
     center_y += dy * scale / height;
+#else
+    center_y -= dy * scale / height;
+#endif //MANDLE_GPU_MODE
 
     start_x = motion_event->x;
     start_y = motion_event->y;
@@ -264,8 +275,6 @@ static gboolean mouse_motion_event(GtkWidget *widget, GdkEventMotion *motion_eve
 
 static gboolean draw_handler(GtkWidget *widget, cairo_t *cr, gpointer user_data)
 {
-  //gtk_window_get_size(gtk_widget_get_window(widget), &width, &height);
-
   width = gtk_widget_get_allocated_width(widget);
   height = gtk_widget_get_allocated_height(widget);
   
@@ -287,8 +296,8 @@ static gboolean draw_handler(GtkWidget *widget, cairo_t *cr, gpointer user_data)
       else{
         
 	double r, g, b;
-	//simple_rgb(t, &r, &g, &b);
-	waves_rgb(t, &r, &g, &b);
+	simple_rgb(t, &r, &g, &b);
+	//waves_rgb(t, &r, &g, &b);
 	//rainbow_rgb(t, &r, &g, &b);
 	cairo_set_source_rgb(cr, r, b, g);
       }
@@ -298,11 +307,6 @@ static gboolean draw_handler(GtkWidget *widget, cairo_t *cr, gpointer user_data)
       cairo_fill(cr);
     }
   }
-
-  
-  
-  //cairo_rectangle(cr, x, y, 1, 1);
-  //cairo_fill(cr);
 
   return FALSE;
 
@@ -316,35 +320,46 @@ static void activate(GtkApplication *app, gpointer user_data)
   window = gtk_application_window_new(app);
   gtk_window_set_title(GTK_WINDOW(window), "Mandelbrot Set");
   gtk_window_set_default_size(GTK_WINDOW(window), width, height);
+  
 
-  //gtk_widget_set_app_paintable(window, TRUE);
-
+#ifdef MANDEL_GPU_MODE
+  printf("GPU MODE\n");
   GtkWidget *gl_area = gtk_gl_area_new();
   gtk_container_add(GTK_CONTAINER(window), gl_area);
   
-
-  //gtk_widget_add_events(window, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK);
   gtk_widget_add_events(gl_area, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK | GDK_KEY_PRESS_MASK);
   gtk_widget_add_events(window, GDK_KEY_PRESS_MASK);
 
   g_signal_connect(window, "key-press-event", G_CALLBACK(key_event), NULL);
-
-  
   g_signal_connect(gl_area, "realize", G_CALLBACK(realize), NULL);
   g_signal_connect(gl_area, "render", G_CALLBACK(render), NULL);
   g_signal_connect(gl_area, "button-press-event", G_CALLBACK(mouse_press_event), NULL);
   g_signal_connect(gl_area, "button-release-event", G_CALLBACK(mouse_release_event), NULL);
   g_signal_connect(gl_area, "motion-notify-event", G_CALLBACK(mouse_motion_event), NULL);
   g_signal_connect(gl_area, "scroll-event", G_CALLBACK(scroll_event), NULL);
-  g_signal_connect(gl_area, "key-press-event", G_CALLBACK(key_event), NULL);
-  
+#endif //MANDEL_GPU_MODE
+
+#ifndef MANDEL_GPU_MODE
+  printf("CPU MODE\n");
+  gtk_widget_set_app_paintable(window, TRUE);
+  gtk_widget_add_events(window, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK | GDK_KEY_PRESS_MASK);
+  g_signal_connect(window, "draw", G_CALLBACK(draw_handler), NULL);
+  g_signal_connect(window, "button-press-event", G_CALLBACK(mouse_press_event), NULL);
+  g_signal_connect(window, "button-release-event", G_CALLBACK(mouse_release_event), NULL);
+  g_signal_connect(window, "motion-notify-event", G_CALLBACK(mouse_motion_event), NULL);
+  g_signal_connect(window, "scroll-event", G_CALLBACK(scroll_event), NULL);
+#endif //!MANDLE_GPU_MODE
   
   gtk_widget_show_all(window);
+  
+#ifdef MANDLE_GPU_MODE
   gtk_widget_grab_focus(gl_area);
 
   const GLubyte *renderer = glGetString(GL_RENDERER);
   const GLubyte *vendor = glGetString(GL_VENDOR);
   printf("GL Renderer: %s\nGL Vendor: %s\n", renderer, vendor);
+#endif //MANDLE_GPU_MODE
+  
 }
 
 
