@@ -2,6 +2,7 @@
 #include <math.h>
 
 #include <gtk/gtk.h>
+#include <epoxy/gl.h>
 
 #include "colours.h"
 
@@ -10,8 +11,8 @@
 #define PAN_SPEED 0.1
 #define ZOOM_FACTOR 0.9
 
-int width = 800;
-int height = 600;
+int width = 1920;
+int height = 1080;
 
 double center_x = -0.5;
 double center_y = 0.0;
@@ -20,6 +21,106 @@ double scale = 4.0;
 double start_x = 0;
 double start_y = 0;
 int dragging = 0;
+
+static GLuint program;
+static GLuint vao;
+
+const char *vertex_shader_src = R"glsl(
+#version 330 core
+out vec2 v_pos;
+void main(){
+  vec2 positions [6] = vec2[](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0));
+  v_pos = positions[gl_VertexID];
+  gl_Position = vec4(v_pos, 0.0, 1.0);
+}
+)glsl";
+
+const char *fragment_shader_src = R"glsl(
+#version 330 core
+in vec2 v_pos;
+out vec4 fragColor;
+
+uniform vec2 u_center;
+uniform float u_scale;
+uniform vec2 u_resolution;
+
+int iters = 100000;
+
+int mandelbrot(vec2 c){
+  vec2 z = vec2(0.0);
+  int i;
+  for(i=0; i < iters; ++i){
+    if(dot(z, z) > 4.0) break;
+    z = vec2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y);
+  }
+  return i;
+}
+
+
+void main(){
+  vec2 uv = v_pos * u_resolution * u_scale + u_center;
+  int m = mandelbrot(uv);
+float t = float(m) / float(iters);
+  vec3 color = vec3(t, t * t, t * t * t);
+  fragColor = vec4(color, 1.0);
+}
+)glsl";
+
+
+static GLuint compile_shader(GLenum type, const char *src)
+{
+  GLuint shader = glCreateShader(type);
+  glShaderSource(shader, 1, &src, NULL);
+  glCompileShader(shader);
+
+  GLint success;
+  glGetShaderiv(shader, GL_COMPILE_STATUS, &success);
+  if(!success){
+    char log[512];
+    glGetShaderInfoLog(shader, 512, NULL, log);
+    g_printerr("Shader compile error: %s\n", log);
+  }
+  
+  return shader;
+}
+
+static void realize(GtkGLArea *area, gpointer user_data)
+{
+  gtk_gl_area_make_current(area);
+  GLuint vs = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
+  GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
+  program = glCreateProgram();
+  glAttachShader(program, vs);
+  glAttachShader(program, fs);
+  glLinkProgram(program);
+
+  glDeleteShader(vs);
+  glDeleteShader(fs);
+
+  glGenVertexArrays(1, &vao);
+
+}
+
+static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
+{
+  gtk_gl_area_make_current(area);
+
+  int w = gtk_widget_get_allocated_width(GTK_WIDGET(area));
+  int h = gtk_widget_get_allocated_height(GTK_WIDGET(area));
+
+  glViewport(0, 0, w, h);
+  glClear(GL_COLOR_BUFFER_BIT);
+
+  glUseProgram(program);
+  glBindVertexArray(vao);
+
+  glUniform2f(glGetUniformLocation(program, "u_center"), center_x, center_y);
+  glUniform1f(glGetUniformLocation(program, "u_scale"), scale / width);
+  glUniform2f(glGetUniformLocation(program, "u_resolution"), (float)width, (float)height);
+
+  glDrawArrays(GL_TRIANGLES, 0, 6);
+
+}
 
 
 typedef struct
@@ -55,30 +156,36 @@ int is_in_mandelbrot(Complex c, int max_iterations)
 }
 
 
-int mandelbrot_escape_iterations(Complex c, int max_iterations)
+int mandelbrot_escape_iterations(Complex c, int max_iterations, double *smooth_t)
 {
   Complex z = {0, 0};
 
-  for(int i = 0; i < max_iterations; ++i){
+  int iterations = 0;
+  for(; iterations < max_iterations; ++iterations){
     z = complex_square(z);
     z.real += c.real;
     z.imag += c.imag;
 
-    if(z.real * z.real + z.imag * z.imag > 4.0){
-      return i;
-    }
+    if(z.real * z.real + z.imag * z.imag > 4.0)
+      break;
   }
-  return max_iterations;
+
+  if(iterations == max_iterations){
+    *smooth_t = 0.0;
+    return 1;
+  }
+
+  double mag = sqrt(z.real * z.real + z.imag * z.imag);
+  *smooth_t = iterations + 1 - log(log(mag)) / log(2.0);
+  return 0;
 
 }
 
-static gboolean scroll_event(GtkWidget *widget, GdkEventScroll *event, gpointer user_data)
+static gboolean scroll_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
-  if(event->direction == GDK_SCROLL_UP){
-    scale *= ZOOM_FACTOR;
-  } else if(event->direction == GDK_SCROLL_DOWN) {
-    scale /= ZOOM_FACTOR;
-  }
+  GdkEventScroll *scroll_event = (GdkEventScroll *)event;
+  double zoom = (scroll_event->direction == GDK_SCROLL_UP) ? 0.9 : 1.1;
+  scale *= zoom;
 
   gtk_widget_queue_draw(widget); //trigger a redraw
 
@@ -86,9 +193,11 @@ static gboolean scroll_event(GtkWidget *widget, GdkEventScroll *event, gpointer 
 
 }
 
-static gboolean key_event(GtkWidget *widget, GdkEventKey *event, gpointer user_data)
+static gboolean key_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
-  switch(event->keyval){
+  printf("Key Event\n");
+  GdkEventKey *key_event = (GdkEventKey *) event;
+  switch(key_event->keyval){
   case GDK_KEY_Up:
     center_y -= PAN_SPEED * scale;
     break;
@@ -113,34 +222,36 @@ static gboolean key_event(GtkWidget *widget, GdkEventKey *event, gpointer user_d
   return TRUE;
 }
 
-static gboolean mouse_press_event(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+static gboolean mouse_press_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
-  if(event->button == 1) {
-    start_x = event->x;
-    start_y = event->y;
+  GdkEventButton *button_event = (GdkEventButton *)event;
+  if(button_event->button == 1) {
+    start_x = button_event->x;
+    start_y = button_event->y;
     dragging = TRUE;
   }
 
   return TRUE;
 }
 
-static gboolean mouse_release_event(GtkWidget *widget, GdkEventButton *event, gpointer user_data)
+static gboolean mouse_release_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
 {
-  if(event->button == 1) dragging = FALSE;
+  GdkEventButton *button_event = (GdkEventButton *)event;
+  if(button_event->button == 1) dragging = FALSE;
   return TRUE;
 }
 
-static gboolean mouse_motion_event(GtkWidget *widget, GdkEventMotion *event, gpointer user_data)
+static gboolean mouse_motion_event(GtkWidget *widget, GdkEventMotion *motion_event, gpointer user_data)
 {
   if(dragging){
-    double dx = event->x - start_x;
-    double dy = event->y - start_y;
+    double dx = motion_event->x - start_x;
+    double dy = motion_event->y - start_y;
 
     center_x -= dx * scale / width;
-    center_y -= dy * scale / height;
+    center_y += dy * scale / height;
 
-    start_x = event->x;
-    start_y = event->y;
+    start_x = motion_event->x;
+    start_y = motion_event->y;
 
     gtk_widget_queue_draw(widget);
     
@@ -155,6 +266,9 @@ static gboolean draw_handler(GtkWidget *widget, cairo_t *cr, gpointer user_data)
 {
   //gtk_window_get_size(gtk_widget_get_window(widget), &width, &height);
 
+  width = gtk_widget_get_allocated_width(widget);
+  height = gtk_widget_get_allocated_height(widget);
+  
   int max_iterations = MAX_ITERATIONS + (int)(log10(1.0 / scale) * 50);
 
   for (int px = 0; px < width; px++){
@@ -164,15 +278,18 @@ static gboolean draw_handler(GtkWidget *widget, cairo_t *cr, gpointer user_data)
 
       Complex c = {x0, y0};
 
-      int iterations = mandelbrot_escape_iterations(c, max_iterations);
+      double smooth_t;
+      int iterations = mandelbrot_escape_iterations(c, max_iterations, &smooth_t);
+      double t = smooth_t / max_iterations;
+      
       if(iterations == max_iterations)
 	cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
       else{
-        double t = (double)iterations / max_iterations;
+        
 	double r, g, b;
 	//simple_rgb(t, &r, &g, &b);
-	//waves_rgb(t, &r, &g, &b);
-	rainbow_rgb(t, &r, &g, &b);
+	waves_rgb(t, &r, &g, &b);
+	//rainbow_rgb(t, &r, &g, &b);
 	cairo_set_source_rgb(cr, r, b, g);
       }
       
@@ -196,30 +313,38 @@ static gboolean draw_handler(GtkWidget *widget, cairo_t *cr, gpointer user_data)
 static void activate(GtkApplication *app, gpointer user_data)
 {
   GtkWidget *window;
-  // GtkWidget *label;
-
   window = gtk_application_window_new(app);
-  //label = gtk_label_new("Hello There GNOME!!");
-  //gtk_container_add(GTK_CONTAINER(window), label);
-  gtk_window_set_title(GTK_WINDOW(window), "Welcome to GNOME");
+  gtk_window_set_title(GTK_WINDOW(window), "Mandelbrot Set");
   gtk_window_set_default_size(GTK_WINDOW(window), width, height);
 
-  gtk_widget_set_app_paintable(window, TRUE);
+  //gtk_widget_set_app_paintable(window, TRUE);
 
-  gtk_widget_add_events(window, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK);
-
-  g_signal_connect(window, "button-press-event", G_CALLBACK(mouse_press_event), NULL);
-  g_signal_connect(window, "button-release-event", G_CALLBACK(mouse_release_event), NULL);
-  g_signal_connect(window, "motion-notify-event", G_CALLBACK(mouse_motion_event), NULL);
+  GtkWidget *gl_area = gtk_gl_area_new();
+  gtk_container_add(GTK_CONTAINER(window), gl_area);
   
-  g_signal_connect(window, "scroll-event", G_CALLBACK(scroll_event), NULL);
 
-  g_signal_connect(window, "key-press_event", G_CALLBACK(key_event), NULL);
+  //gtk_widget_add_events(window, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK);
+  gtk_widget_add_events(gl_area, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK | GDK_KEY_PRESS_MASK);
+  gtk_widget_add_events(window, GDK_KEY_PRESS_MASK);
+
+  g_signal_connect(window, "key-press-event", G_CALLBACK(key_event), NULL);
+
   
-  g_signal_connect(window, "draw", G_CALLBACK(draw_handler), NULL);
+  g_signal_connect(gl_area, "realize", G_CALLBACK(realize), NULL);
+  g_signal_connect(gl_area, "render", G_CALLBACK(render), NULL);
+  g_signal_connect(gl_area, "button-press-event", G_CALLBACK(mouse_press_event), NULL);
+  g_signal_connect(gl_area, "button-release-event", G_CALLBACK(mouse_release_event), NULL);
+  g_signal_connect(gl_area, "motion-notify-event", G_CALLBACK(mouse_motion_event), NULL);
+  g_signal_connect(gl_area, "scroll-event", G_CALLBACK(scroll_event), NULL);
+  g_signal_connect(gl_area, "key-press-event", G_CALLBACK(key_event), NULL);
+  
   
   gtk_widget_show_all(window);
-  
+  gtk_widget_grab_focus(gl_area);
+
+  const GLubyte *renderer = glGetString(GL_RENDERER);
+  const GLubyte *vendor = glGetString(GL_VENDOR);
+  printf("GL Renderer: %s\nGL Vendor: %s\n", renderer, vendor);
 }
 
 
