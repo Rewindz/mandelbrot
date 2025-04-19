@@ -201,21 +201,30 @@ static gboolean scroll_event(GtkWidget *widget, GdkEvent *event, gpointer user_d
 
 }
 
-static gboolean key_event(GtkWidget *widget, GdkEvent *event, gpointer user_data)
+static gboolean keypress_event(GtkWidget *widget, GdkEventKey *key_event, gpointer user_data)
 {
-  GdkEventKey *key_event = (GdkEventKey *) event;
   switch(key_event->keyval){
   case GDK_KEY_Up:
+  case GDK_KEY_w:
     center_y -= PAN_SPEED * scale;
     break;
   case GDK_KEY_Down:
+  case GDK_KEY_s:
     center_y += PAN_SPEED * scale;
     break;
   case GDK_KEY_Left:
+  case GDK_KEY_a:
     center_x -= PAN_SPEED * scale;
     break;
   case GDK_KEY_Right:
+  case GDK_KEY_d:
     center_x += PAN_SPEED * scale;
+    break;
+  case GDK_KEY_f:
+    scale *= ZOOM_FACTOR;
+    break;
+  case GDK_KEY_r:
+    scale /= ZOOM_FACTOR; 
     break;
   case GDK_KEY_0:
     center_y = 0;
@@ -330,7 +339,7 @@ static void activate(GtkApplication *app, gpointer user_data)
   gtk_widget_add_events(gl_area, GDK_SCROLL_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK | GDK_POINTER_MOTION_MASK | GDK_KEY_PRESS_MASK);
   gtk_widget_add_events(window, GDK_KEY_PRESS_MASK);
 
-  g_signal_connect(window, "key-press-event", G_CALLBACK(key_event), NULL);
+  g_signal_connect(window, "key-press-event", G_CALLBACK(keypress_event), NULL);
   g_signal_connect(gl_area, "realize", G_CALLBACK(realize), NULL);
   g_signal_connect(gl_area, "render", G_CALLBACK(render), NULL);
   g_signal_connect(gl_area, "button-press-event", G_CALLBACK(mouse_press_event), NULL);
@@ -348,6 +357,7 @@ static void activate(GtkApplication *app, gpointer user_data)
   g_signal_connect(window, "button-release-event", G_CALLBACK(mouse_release_event), NULL);
   g_signal_connect(window, "motion-notify-event", G_CALLBACK(mouse_motion_event), NULL);
   g_signal_connect(window, "scroll-event", G_CALLBACK(scroll_event), NULL);
+  g_signal_connect(window, "key-press-event", G_CALLBACK(keypress_event), NULL);
 #endif //!MANDLE_GPU_MODE
   
   gtk_widget_show_all(window);
