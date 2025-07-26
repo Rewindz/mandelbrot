@@ -1,4 +1,6 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 #include <math.h>
 
 #include <gtk/gtk.h>
@@ -6,7 +8,7 @@
 
 #include "colours.h"
 
-//#define MANDEL_GPU_MODE
+#define MANDEL_GPU_MODE
 
 
 #define MAX_ITERATIONS 1000
@@ -27,50 +29,10 @@ int dragging = 0;
 static GLuint program;
 static GLuint vao;
 
-const char *vertex_shader_src = R"glsl(
-#version 330 core
-out vec2 v_pos;
-void main(){
-  vec2 positions [6] = vec2[](vec2(-1.0, -1.0), vec2(1.0, -1.0), vec2(-1.0, 1.0), vec2(-1.0, 1.0), vec2(1.0, -1.0), vec2(1.0, 1.0));
-  v_pos = positions[gl_VertexID];
-  gl_Position = vec4(v_pos, 0.0, 1.0);
-}
-)glsl";
-
-const char *fragment_shader_src = R"glsl(
-#version 400
-#extension GL_ARB_gpu_shader_fp64 : enable
-in vec2 v_pos;
-out vec4 fragColor;
-
-uniform vec2 u_center;
-uniform float u_scale;
-uniform vec2 u_resolution;
-uniform int u_iters;
-
-
-int mandelbrot(vec2 c){
-  vec2 z = vec2(0.0);
-  int i;
-  for(i=0; i < u_iters; ++i){
-    if(dot(z, z) > 4.0) break;
-    z = vec2(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y);
-  }
-  return i;
-}
-
-
-void main(){
-  vec2 uv = v_pos * u_resolution * u_scale + u_center;
-  int m = mandelbrot(uv);
-  float t = float(m) / float(u_iters);
-  vec3 color = vec3(t, t * t, t * t * t);
-  fragColor = vec4(color, 1.0);
-}
-)glsl";
-
 
  //dvec2 uv = v_pos * u_resolution * u_scale + u_center;
+
+ // https://www.khronos.org/opengl/wiki/Shader_Compilation
 
 static GLuint compile_shader(GLenum type, const char *src)
 {
@@ -89,11 +51,48 @@ static GLuint compile_shader(GLenum type, const char *src)
   return shader;
 }
 
+static char *shader_src_from_file(const char *path){
+  FILE *src_file = fopen(path, "r");
+  if(!src_file){
+    fprintf(stderr, "Could not open file: %s!\n", path);
+    return NULL;
+  }
+
+  if(fseek(src_file, 0, SEEK_END)){
+    fprintf(stderr, "Could not seek into file: %s!\n", path);
+    return NULL;
+  }
+  
+  long src_size = ftell(src_file);
+  rewind(src_file);
+
+  char *src = calloc(src_size + 2, sizeof(char));
+
+  if(!src){
+    fprintf(stderr, "Could not allocate %zd bytes for file: %s!\n", src_size + 2, path);
+    return NULL;
+  }
+
+  int read_bytes = fread(src, sizeof(char), src_size, src_file);
+  printf("Read %zd bytes from file: %s\n", read_bytes, path);
+  return src;
+  
+}
+
 static void realize(GtkGLArea *area, gpointer user_data)
 {
   gtk_gl_area_make_current(area);
+  char *vertex_shader_src = shader_src_from_file("shaders/vertex.glsl");
+  char *fragment_shader_src = shader_src_from_file("shaders/frag.glsl");
+  if(!vertex_shader_src || !fragment_shader_src){
+    fprintf(stderr, "Failed to load a shader source from disk!\n");
+    abort(); // Great practice! /s
+  }
   GLuint vs = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
   GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
+  free(vertex_shader_src);
+  free(fragment_shader_src);
+  
   program = glCreateProgram();
   glAttachShader(program, vs);
   glAttachShader(program, fs);
@@ -362,7 +361,7 @@ static void activate(GtkApplication *app, gpointer user_data)
   
   gtk_widget_show_all(window);
   
-#ifdef MANDLE_GPU_MODE
+#ifdef MANDEL_GPU_MODE
   gtk_widget_grab_focus(gl_area);
 
   const GLubyte *renderer = glGetString(GL_RENDERER);
