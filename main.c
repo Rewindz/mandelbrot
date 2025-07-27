@@ -11,12 +11,12 @@
 #define MANDEL_GPU_MODE
 
 
-#define MAX_ITERATIONS 1000
+#define MAX_ITERATIONS 2000
 #define PAN_SPEED 0.1
 #define ZOOM_FACTOR 0.9
 
-int width = 400;
-int height = 400;
+int width = 1280;
+int height = 960;
 
 double center_x = -0.5;
 double center_y = 0.0;
@@ -27,7 +27,9 @@ double start_y = 0;
 int dragging = 0;
 
 static GLuint program;
-static GLuint vao;
+static GLuint compute_program;
+static GLuint output_tex;
+static GLuint quad_vao;
 
 
  //dvec2 uv = v_pos * u_resolution * u_scale + u_center;
@@ -74,7 +76,8 @@ static char *shader_src_from_file(const char *path){
   }
 
   int read_bytes = fread(src, sizeof(char), src_size, src_file);
-  printf("Read %zd bytes from file: %s\n", read_bytes, path);
+  printf("Read %d bytes from file: %s\n", read_bytes, path);
+  fclose(src_file);
   return src;
   
 }
@@ -82,43 +85,93 @@ static char *shader_src_from_file(const char *path){
 static void realize(GtkGLArea *area, gpointer user_data)
 {
   gtk_gl_area_make_current(area);
+  
   char *vertex_shader_src = shader_src_from_file("shaders/vertex.glsl");
-  char *fragment_shader_src = shader_src_from_file("shaders/frag.glsl");
-  if(!vertex_shader_src || !fragment_shader_src){
+  char *fragment_shader_src = shader_src_from_file("shaders/frag2.glsl");
+  char *compute_shader_src = shader_src_from_file("shaders/compute.glsl");
+  if(!vertex_shader_src || !fragment_shader_src || !compute_shader_src){
     fprintf(stderr, "Failed to load a shader source from disk!\n");
     abort(); // Great practice! /s
   }
   GLuint vs = compile_shader(GL_VERTEX_SHADER, vertex_shader_src);
   GLuint fs = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src);
+  GLuint cs = compile_shader(GL_COMPUTE_SHADER, compute_shader_src);
   free(vertex_shader_src);
   free(fragment_shader_src);
-  
+  free(compute_shader_src);
+
   program = glCreateProgram();
   glAttachShader(program, vs);
   glAttachShader(program, fs);
   glLinkProgram(program);
 
+  GLint success;
+  glGetProgramiv(program, GL_LINK_STATUS, &success);
+  if (!success) {
+    char log[512];
+    glGetProgramInfoLog(program, 512, NULL, log);
+    g_printerr("Program link error: %s\n", log);
+  }
+
+  compute_program = glCreateProgram();
+  glAttachShader(compute_program, cs);
+  glLinkProgram(compute_program);
+
+  glGetProgramiv(compute_program, GL_LINK_STATUS, &success);
+  if (!success) {
+    char log[512];
+    glGetProgramInfoLog(compute_program, 512, NULL, log);
+    g_printerr("Program link error: %s\n", log);
+  }
+
   glDeleteShader(vs);
   glDeleteShader(fs);
+  glDeleteShader(cs);
+  
+  
+  float quad_vertices[] = {
+    // positions   // texcoords
+    -1.0f, -1.0f,  0.0f, 0.0f,
+    1.0f, -1.0f,  1.0f, 0.0f,
+    -1.0f,  1.0f,  0.0f, 1.0f,
+    -1.0f,  1.0f,  0.0f, 1.0f,
+    1.0f, -1.0f,  1.0f, 0.0f,
+    1.0f,  1.0f,  1.0f, 1.0f,
+  };
 
-  glGenVertexArrays(1, &vao);
+  GLuint quad_vbo;
+  glGenVertexArrays(1, &quad_vao);
+  glGenBuffers(1, &quad_vbo);
+
+  glBindVertexArray(quad_vao);
+  glBindBuffer(GL_ARRAY_BUFFER, quad_vbo);
+  glBufferData(GL_ARRAY_BUFFER, sizeof(quad_vertices), quad_vertices, GL_STATIC_DRAW);
+
+  
+  // Position
+  glEnableVertexAttribArray(0);
+  glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)0);
+  // Texcoord
+  glEnableVertexAttribArray(1);
+  glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 4 * sizeof(float), (void*)(2 * sizeof(float)));
 
 }
 
-static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
+/*static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
 {
   gtk_gl_area_make_current(area);
 
   int w = gtk_widget_get_allocated_width(GTK_WIDGET(area));
   int h = gtk_widget_get_allocated_height(GTK_WIDGET(area));
   int max_iterations = MAX_ITERATIONS + (int)(log10(1.0 / scale) * 50);
-  printf("Max iterations: %i\n", max_iterations);
+  //printf("Max iterations: %i\n", max_iterations);
 
   glViewport(0, 0, w, h);
   glClear(GL_COLOR_BUFFER_BIT);
 
   glUseProgram(program);
   glBindVertexArray(vao);
+  printf("Center X: %F\t Center Y: %F\nScale: %.20LF\nWidth: %d\tHeight: %d\nMax Iterations: %d\n\n", center_x, center_y, (long double)(scale / width), width, height, max_iterations);
 
   glUniform2f(glGetUniformLocation(program, "u_center"), center_x, center_y);
   glUniform1f(glGetUniformLocation(program, "u_scale"), scale / width);
@@ -127,6 +180,61 @@ static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
 
   glDrawArrays(GL_TRIANGLES, 0, 6);
 
+  }*/
+
+static void render(GtkGLArea *area, GdkGLContext *context, gpointer user_data)
+{
+    gtk_gl_area_make_current(area);
+
+    int width = gtk_widget_get_allocated_width(GTK_WIDGET(area));
+    int height = gtk_widget_get_allocated_height(GTK_WIDGET(area));
+
+    int max_iterations = MAX_ITERATIONS + (int)(log10(1.0 / scale) * 50);
+
+    printf("Center X: %.20lf\t Center Y: %.20lf\nScale: %.20Lf\nWidth: %d\tHeight: %d\nMax Iterations: %d\n\n",
+           center_x, center_y, (long double)(scale / width), width, height, max_iterations);
+
+    // -- Resize output texture if needed --
+    static int tex_width = 0, tex_height = 0;
+    if (tex_width != width || tex_height != height) {
+        if (output_tex) {
+            glDeleteTextures(1, &output_tex);
+        }
+
+        glGenTextures(1, &output_tex);
+        glBindTexture(GL_TEXTURE_2D, output_tex);
+        glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, NULL);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        tex_width = width;
+        tex_height = height;
+    }
+
+    // -- Compute Shader Pass --
+    glUseProgram(compute_program);
+
+    glUniform2d(glGetUniformLocation(compute_program, "u_center"), center_x, center_y);
+    glUniform1d(glGetUniformLocation(compute_program, "u_scale"), scale / width);
+    glUniform2i(glGetUniformLocation(compute_program, "u_resolution"), width, height);
+    glUniform1i(glGetUniformLocation(compute_program, "u_iters"), max_iterations);
+
+    glBindImageTexture(0, output_tex, 0, GL_FALSE, 0, GL_WRITE_ONLY, GL_RGBA8);
+
+    glDispatchCompute((GLuint)(width / 16 + 1), (GLuint)(height / 16 + 1), 1);
+    glMemoryBarrier(GL_SHADER_IMAGE_ACCESS_BARRIER_BIT);
+
+    // -- Display Pass (Textured Fullscreen Quad) --
+    glViewport(0, 0, width, height);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    glUseProgram(program);
+
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_2D, output_tex);
+    glUniform1i(glGetUniformLocation(program, "tex"), 0);
+
+    glBindVertexArray(quad_vao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
 }
 
 
